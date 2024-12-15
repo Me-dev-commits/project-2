@@ -1,95 +1,106 @@
-import pandas as pd
-import openai
-import matplotlib
-matplotlib.use("Agg")  # Use a non-interactive backend
-import matplotlib.pyplot as plt
-import seaborn as sns
 import os
+import sys
+import pandas as pd
+import seaborn as sns
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+import httpx
+import chardet
 
-# Set up the API key and proxy URL
-openai.api_key = os.getenv("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")  # Secure setup (best practice)
-openai.api_base = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+# Constants
+API_URL = "https://aiproxy.sanand.workers.dev/openai/v1/chat/completions"
+AIPROXY_TOKEN = "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"
 
-# List of CSV files to process
-CSV_FILES = ["goodreads.csv", "happiness.csv", "media.csv"]
+def load_data(file_path):
+    """Load CSV data with encoding detection."""
+    if not os.path.isfile(file_path):
+        print(f"Error: File '{file_path}' not found.")
+        sys.exit(1)
+    with open(file_path, 'rb') as f:
+        result = chardet.detect(f.read())
+    encoding = result['encoding']
+    print(f"Detected file encoding: {encoding}")
+    return pd.read_csv(file_path, encoding=encoding)
 
-# Process Each CSV File
-for csv_file in CSV_FILES:
-    print(f"Processing {csv_file}...")
-    
+def analyze_data(df):
+    """Perform basic data analysis."""
+    if df.empty:
+        print("Error: Dataset is empty.")
+        sys.exit(1)
+    numeric_df = df.select_dtypes(include=['number'])  # Select only numeric columns
+    analysis = {
+        'summary': df.describe(include='all').to_dict(),
+        'missing_values': df.isnull().sum().to_dict(),
+        'correlation': numeric_df.corr().to_dict()  # Compute correlation only on numeric columns
+    }
+    print("Data analysis complete.")
+    return analysis
+
+def visualize_data(df):
+    """Generate and save visualizations."""
+    sns.set(style="whitegrid")
+    numeric_columns = df.select_dtypes(include=['number']).columns
+    if numeric_columns.empty:
+        print("No numeric columns found for visualization.")
+        return
+    for column in numeric_columns:
+        plt.figure()
+        sns.histplot(df[column].dropna(), kde=True)
+        plt.title(f'Distribution of {column}')
+        file_name = f'{column}_distribution.png'
+        plt.savefig(file_name)
+        print(f"Saved distribution plot: {file_name}")
+        plt.close()
+
+def generate_narrative(analysis):
+    """Generate narrative using LLM."""
+    headers = {
+        'Authorization': f'Bearer {AIPROXY_TOKEN}',
+        'Content-Type': 'application/json'
+    }
+    prompt = f"Provide a detailed analysis based on the following data summary: {analysis}"
+    data = {
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": prompt}]
+    }
     try:
-        # Try reading the dataset with different encoding
-        data = pd.read_csv(csv_file, encoding='ISO-8859-1')  # Try 'ISO-8859-1' or 'latin1'
-    except UnicodeDecodeError:
-        print(f"Error: Unable to read {csv_file} due to encoding issues.")
-        continue  # Skip to the next file if encoding fails
+        response = httpx.post(API_URL, headers=headers, json=data, timeout=30.0)
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
+    except httpx.HTTPStatusError as e:
+        print(f"HTTP error occurred: {e}")
+    except httpx.RequestError as e:
+        print(f"Request error occurred: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    return "Narrative generation failed due to an error."
 
-    print(data.columns)
-    print(data.head())  # Check the first few rows
-
-    summary = data.describe(include="all")
-    print(summary)
-
-    missing_data = data.isnull().sum()
-    print(missing_data)
-
-    # AI Analysis - Generate summary for each CSV file
-    report_prompt = f"""
-    Create a summary of the dataset {csv_file}. Include:
-    - Overview of key statistics
-    - Top trends or correlations
-    - Recommendations for next steps
-    """
-
-    openai.api_key = ""  # Replace this with your real token
-    openai.api_base = "https://aiproxy.sanand.workers.dev/openai/v1"
-
-    response = openai.ChatCompletion.create(
-        model="gpt-4o-mini",
-        messages=[ 
-            {"role": "system", "content": "You are an assistant generating data analysis summaries."},
-            {"role": "user", "content": report_prompt}
-        ],
-        max_tokens=300
-    )
+def main(file_path):
+    print("Starting autolysis process...")
+    df = load_data(file_path)
+    print("Dataset loaded successfully.")
     
-    report_text = response['choices'][0]['message']['content'].strip()
-
-    # Save the report for each dataset
-    report_filename = f"{os.path.splitext(csv_file)[0]}_README.md"
-    with open(report_filename, "w") as f:
-        f.write(f"# Data Analysis Report for {csv_file.capitalize()}\n")
-        f.write("## Summary\n")
-        f.write(report_text + "\n\n")
-
-    # Visualization: Top Genres or Any Relevant Columns (if applicable)
-    if "Genre" in data.columns and "Rating" in data.columns:
-        top_genres = data.groupby("Genre")["Rating"].mean().sort_values(ascending=False).head(5)
-        sns.barplot(x=top_genres.index, y=top_genres.values)
-        plt.title(f"Top 5 Genres by Average Rating for {csv_file}")
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        
-        # Save the bar plot for each dataset
-        output_path = f"{os.path.splitext(csv_file)[0]}_top_genres.png"
-        plt.savefig(output_path)
-        plt.clf()  # Clear the plot for the next iteration
+    print("Analyzing data...")
+    analysis = analyze_data(df)
+    
+    print("Generating visualizations...")
+    visualize_data(df)
+    
+    print("Generating narrative...")
+    narrative = generate_narrative(analysis)
+    
+    if narrative != "Narrative generation failed due to an error.":
+        with open('README.md', 'w') as f:
+            f.write(narrative)
+        print("Narrative successfully written to README.md.")
     else:
-        print(f"Skipping top genres visualization for {csv_file} - 'Genre' or 'Rating' column missing.")    
+        print("Narrative generation failed. Skipping README creation.")
+    
+    print("Autolysis process completed.")
 
-    # Correlation Heatmap for numeric columns (if applicable)
-    numeric_data = data.select_dtypes(include=['number'])
-    if not numeric_data.empty:
-        corr = numeric_data.corr()
-        sns.heatmap(corr, annot=True, cmap="coolwarm")
-        plt.title(f"Correlation Heatmap for {csv_file}")
-        plt.tight_layout()
-        
-        # Save the heatmap for each dataset
-        heatmap_filename = f"{os.path.splitext(csv_file)[0]}_heatmap.png"
-        plt.savefig(heatmap_filename)
-        plt.clf()  # Clear the plot for the next iteration
-
-    print(f"Finished processing {csv_file}. Results saved for {csv_file}.\n")
-
-print("Processing complete for all datasets.")
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python autolysis.py <file_path>")
+        sys.exit(1)
+    main(sys.argv[1])
